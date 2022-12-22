@@ -6,11 +6,15 @@ import "solmate/src/utils/SafeTransferLib.sol";
 import "solmate/src/tokens/ERC721.sol";
 import "./SMRAErrors.sol";
 
+
+/// @title A simulator for trees
+/// @author Ruifan Wang, Leo Zheng, Andrew Rigas
+/// @notice draws from https://github.com/a16z/auction-zoo/tree/main/src/sealed-bid/over-collateralized-auction
+
 contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
     using SafeTransferLib for address;
-    // needs to account for multiple items and multiple rounds
 
-    /// @dev Representation of an auction in storage. Occupies three slots.
+    /// @dev Representation of an auction in storage.
     /// @param seller The address selling the auctioned asset.
     /// @param startTime The unix timestamp at which bidding can start.
     /// @param endOfBiddingPeriod The unix timestamp after which bids can no
@@ -22,8 +26,12 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
     /// @param numUnrevealedBids The number of bid commitments that have not
     ///        yet been opened.
     /// @param highestBids For each item, the value of the highest bid revealed so far,
-    ///        or the reserve price if no bids have exceeded it.
+    ///        or the reserve price if no bids have exceeded it
+    ///        This needs to map from tokenId to highest bid,
+    ///        since there are multiple items in an auction (change from a16z implementation)
     /// @param highestBidders For each item, the bidder that placed the highest bid
+    ///        This needs to map from tokenId to highest bidder,
+    ///        since there are multiple items in an auction (change from a16z implementation).
     /// @param index Auctions selling the same asset (i.e. tokenContract-tokenId
     ///        pair) share the same storage. This value is incremented for 
     ///        each new auction of a particular asset.
@@ -57,6 +65,7 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
     ///        concern, it is possible to further mitigate the possibility of such 
     ///        an attack by using the full 32-byte hash value for the bid commitment. 
     /// @param collateral The amount of collateral backing the bid.
+    /// @param revealed Whether the user has revealed the bid (necessary for multi round format).
     struct Bid {
         bytes20 commitment;
         uint96 collateral;
@@ -70,7 +79,7 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
     /// @notice Emitted when an auction is created.
     /// @param tokenContract The address of the ERC721 contract for the asset
     ///        being auctioned.
-    /// @param tokenIds The ERC721 token ID of the asset being auctioned.
+    /// @param tokenIds The ERC721 token IDs of the assets being auctioned.
     /// @param seller The address selling the auctioned asset.
     /// @param startTime The unix timestamp at which bidding can start.
     /// @param bidPeriod The duration of the bidding period, in seconds.
@@ -91,7 +100,7 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
     /// @notice Emitted when a bid commitment is opened.
     /// @param tokenContract The address of the ERC721 contract for the asset
     ///        being auctioned.
-    /// @param tokenIds The ERC721 token ID of the asset being auctioned.
+    /// @param tokenIds The ERC721 token IDs of the assets being auctioned.
     /// @param commitment The commitment that was opened.
     /// @param bidder The bidder whose bid was revealed.
     /// @param nonce The random input used to obfuscate the commitment.
@@ -105,16 +114,18 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
         uint96 bidValue
     );
 
-
-    // a16z implementation maps from nft contract to token id to auction
-    // need to map from nft contract to group of token ids to auction
-    // right now user needs to follow ordering of tokenIds from least to greatest
+    /// @notice A mapping storing auction parameters and state, indexed by
+    ///         the ERC721 contract address and a hash (instead of single token ID as in a16z implementation)
+    ///         of the token IDs of the assets being auctioned.
+    ///         A hash for the multi-item auction is needed because a mapping key cannot be an array or struct.
     mapping(address => mapping(bytes32 => Auction)) public auctions;
 
     /// @notice A mapping storing bid commitments and records of collateral, 
-    ///         indexed by: ERC721 contract address, token ID, auction index, 
-    ///         and bidder address. If the commitment is `bytes20(0)`, either
+    ///         indexed by: ERC721 contract address, hash of token IDs, auction index, 
+    ///         specific token ID, and bidder address. If the commitment is `bytes20(0)`, either
     ///         no commitment was made or the commitment was opened.
+    ///         In addition to hash of token ids, this state variable mapping includes
+    ///         a specific token ID that a bid is placed on, modifying the a16z implementation.
     mapping(address // ERC721 token contract
         => mapping(bytes32 // ERC721 token IDs
             => mapping(uint64 // Auction index
@@ -122,14 +133,13 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
                     => mapping(address // Bidder
                         => Bid))))) public bids;
 
-    // bool newRound;
     uint64 bidCounter = 0;
 
-    /// @notice Creates an auction for the given ERC721 asset with the given
+    /// @notice Creates an auction for the given ERC721 assets with the given
     ///         auction parameters.
     /// @param tokenContract The address of the ERC721 contract for the asset
     ///        being auctioned.
-    /// @param tokenIds The ERC721 token ID of the asset being auctioned.
+    /// @param tokenIds The ERC721 token IDs of the assets being auctioned.
     /// @param startTime The unix timestamp at which bidding can start.
     /// @param bidPeriod The duration of the bidding period, in seconds.
     /// @param revealPeriod The duration of the commitment reveal period, 
@@ -195,9 +205,10 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
     /// @notice Commits to a bid on an one item being auctioned out of the list of items in tokenIds. If a bid was
     ///         previously committed to, overwrites the previous commitment.
     ///         Value attached to this call is used as collateral for the bid.
+    ///         Modifying the a16z implementation, sets the bid as unrevealed.
     /// @param tokenContract The address of the ERC721 contract for the asset
     ///        being auctioned.
-    /// @param tokenIds The list of ERC721 token IDs of the assets being auctioned.
+    /// @param tokenIds The hash of ERC721 token IDs of the assets being auctioned.
     /// @param specificTokenId The specific item (ERC721 token ID) to be bid on.
     /// @param commitment The commitment to the bid, computed as
     ///        `bytes20(keccak256(abi.encode(nonce, bidValue, tokenContract, tokenIds, specifictokenId, auctionIndex)))`.
@@ -240,16 +251,16 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
         if (msg.value != 0) {
             bid.collateral += uint96(msg.value);
         }
-        // if (!newRound) {
-        //     newRound = true;
-        // }
     }
 
 
     /// @notice Reveals the value of a bid that was previously committed to. 
+    ///         Unlike in a16z implementation, non-highest bidder collateral is not
+    ///         returned in this function, since there can be another bidding round.
+    ///         User must call withdrawCollateral() to do so.
     /// @param tokenContract The address of the ERC721 contract for the asset
     ///        being auctioned.
-    /// @param tokenIds The list of ERC721 token IDs of the assets being auctioned.
+    /// @param tokenIds The hash of ERC721 token IDs of the assets being auctioned.
     /// @param specificTokenId The specific ERC721 token ID being bid on.
     /// @param bidValue The value of the bid.
     /// @param nonce The random input used to obfuscate the commitment.
@@ -306,13 +317,6 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
             if (bidValue > currentHighestBid) {
                 auction.highestBids[specificTokenId] = bidValue;
                 auction.highestBidders[specificTokenId] = msg.sender;
-            } else {
-                // Return collateral if there will not be another round
-                // if (!newRound) {
-                if (bidCounter == 0) {
-                    bid.collateral = 0;
-                    msg.sender.safeTransferETH(collateral);
-                }
             }
 
             emit BidRevealed(
@@ -326,15 +330,16 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
         }
     }
 
-    // end round, which could mean the end of the auction
-
-    /// @notice Ends an active auction. Can only end an auction if the bid reveal
-    ///         phase is over, or if all bids have been revealed. Disburses the auction
-    ///         proceeds to the seller. Transfers the auctioned asset to the winning
+    /// @notice Ends an active round. Can only end a round if the bid reveal
+    ///         phase is over, or if all bids have been revealed.
+    ///         If there are no revealed bids:      
+    ///         Disburses the auction proceeds to the seller. Transfers the auctioned asset to the winning
     ///         bidder and returns any excess collateral. If no bidder exceeded the
     ///         auction's reserve price, returns the asset to the seller.
+    ///         Otherwise, sets up next round with specified arguments,
+    ///         or uses arguments from createAuction().
     /// @param tokenContract The address of the ERC721 contract for the asset auctioned.
-    /// @param tokenIds The list of ERC721 token IDs of the assets auctioned.
+    /// @param tokenIds The hash of ERC721 token IDs of the assets auctioned.
     /// @param startTime The unix timestamp at which bidding can start, if there is new round.
     /// @param bidPeriod The duration of the bidding period, in seconds, if there is new round.
     /// @param revealPeriod The duration of the commitment reveal period, 
@@ -411,7 +416,6 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
             auction.startTime = startTime;
             auction.endOfBiddingPeriod = startTime + bidPeriod;
             auction.endOfRevealPeriod = startTime + bidPeriod + revealPeriod;
-            // newRound = false;
             bidCounter = 0;
         }
     }
@@ -420,7 +424,7 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
     ///         and cannot be in the running to win the auction.
     /// @param tokenContract The address of the ERC721 contract for the asset
     ///        that was auctioned.
-    /// @param tokenIds The ERC721 token ID of the asset that was auctioned.
+    /// @param tokenIds The hash of ERC721 token IDs of the assets that was auctioned.
     /// @param auctionIndex The index of the auction that was being bid on.
     function withdrawCollateral(
         address tokenContract,
@@ -457,9 +461,10 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
 
     /// @notice Withdraws collateral. Bidder must have opened their bid commitment
     ///         and this only applies to the period before revealing the bid.
+    ///         This action is allowed in an SMRA, but not in the a16z implementation's auction format.
     /// @param tokenContract The address of the ERC721 contract for the asset
     ///        that was auctioned.
-    /// @param tokenIds The ERC721 token ID of the asset that was auctioned.
+    /// @param tokenIds The hash of ERC721 token IDs of the assets being auctioned.
     /// @param auctionIndex The index of the auction that was being bid on.
     function withdrawCollateralBeforeReveal(
         address tokenContract,
