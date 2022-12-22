@@ -57,6 +57,7 @@ contract SimultaneousMultiRoundAuction {
     struct Bid {
         bytes20 commitment;
         uint96 collateral;
+        bool revealed;
     }
 
 
@@ -65,7 +66,8 @@ contract SimultaneousMultiRoundAuction {
     // right now user needs to follow ordering of tokenIds from least to greatest
     mapping(address => mapping(uint256[] => Auction)) public auctions;
 
-    bool newRound;
+    // bool newRound;
+    uint64 bidCounter = 0;
 
     /// @notice A mapping storing bid commitments and records of collateral, 
     ///         indexed by: ERC721 contract address, token ID, auction index, 
@@ -182,14 +184,21 @@ contract SimultaneousMultiRoundAuction {
         // If this is the bidder's first commitment, increment `numUnrevealedBids`.
         if (bid.commitment == bytes20(0)) {
             auction.numUnrevealedBids++;
+            bid.revealed = true;
+        }
+        if (!bid.revealed) {
+            revert NotRevealedError();
         }
         bid.commitment = commitment;
+        // set revealed to false, which allows bidders to cal the second withdraw func
+        bid.revealed = false;
         if (msg.value != 0) {
             bid.collateral += uint96(msg.value);
         }
-        if (!newRound) {
-            newRound = true;
-        }
+        // if (!newRound) {
+        //     newRound = true;
+        // }
+        bidCounter += 1;
     }
 
 
@@ -236,6 +245,8 @@ contract SimultaneousMultiRoundAuction {
         } else {
             // Mark commitment as open
             bid.commitment = bytes20(0);
+            // Mark bid as being revealed;
+            bid.revealed = true;
             auction.numUnrevealedBids--;
         }
 
@@ -252,7 +263,8 @@ contract SimultaneousMultiRoundAuction {
                 auction.highestBidders[specificTokenId] = msg.sender;
             } else {
                 // Return collateral if there will not be another round
-                if (!newRound) {
+                // if (!newRound) {
+                if (bidCounter == 0) {
                     bid.collateral = 0;
                     msg.sender.safeTransferETH(collateral);
                 }
@@ -306,21 +318,27 @@ contract SimultaneousMultiRoundAuction {
             }
         }
 
-        if (!newRound) {
+        // if (!newRound) {
+        if (bidCounter == 0) {
             // no new bids that round so end auction
             for (uint i = 0; i < tokenIds.length; i++) {
-                address itemHighestBidder = auction.highestBidders[tokenIds[i]];
+                /// TODO: double check specificTokenId?
+                uint256 specificTokenId = tokenIds[i];
+                address itemHighestBidder = auction.highestBidders[specificTokenId];
                 if (itemHighestBidder == address(0)) {
-                // No winner, return asset to seller.
-                ERC721(tokenContract).safeTransferFrom(address(this), auction.seller, specificTokenId);
+                    // No winner, return asset to seller.
+                    ERC721(tokenContract).safeTransferFrom(address(this), auction.seller, specificTokenId);
                 } else {
+                    Bid storage bid = bids[tokenContract][tokenIds][auction.index][specificTokenId][itemHighestBidder];
+                    if (!bid.revealed) {
+                        revert NotRevealedError();
+                    }
                     // Transfer auctioned asset to highest bidder
                     ERC721(tokenContract).safeTransferFrom(address(this), itemHighestBidder, specificTokenId);
                     uint96 itemHighestBid = highestBid[specificTokenId];
                     auction.seller.safeTransferETH(itemHighestBid);
 
                     // Return excess collateral
-                    Bid storage bid = bids[tokenContract][tokenIds][auction.index][specificTokenId][itemHighestBidder];
                     uint96 collateral = bid.collateral;
                     bid.collateral = 0;
                     if (collateral - itemHighestBid != 0) {
@@ -347,6 +365,8 @@ contract SimultaneousMultiRoundAuction {
             auction.startTime = startTime;
             auction.endOfBiddingPeriod = startTime + bidPeriod;
             auction.endOfRevealPeriod = startTime + bidPeriod + revealPeriod;
+            // newRound = false;
+            bidCounter = 0;
         }
     }
 
@@ -386,6 +406,44 @@ contract SimultaneousMultiRoundAuction {
         uint96 collateral = bid.collateral;
         bid.collateral = 0;
         msg.sender.safeTransferETH(collateral);
+    }
+
+    /// @notice Withdraws collateral. Bidder must have opened their bid commitment
+    ///         and this only applies to the period before revealing the bid.
+    /// @param tokenContract The address of the ERC721 contract for the asset
+    ///        that was auctioned.
+    /// @param tokenIds The ERC721 token ID of the asset that was auctioned.
+    /// @param auctionIndex The index of the auction that was being bid on.
+    function withdrawCollateralBeforeReveal(
+        address tokenContract,
+        uint256[] tokenIds,
+        uint64 auctionIndex
+    )
+        external
+        nonReentrant        
+    {
+        Auction storage auction = auctions[tokenContract][tokenIds];
+        uint64 currentAuctionIndex = auction.index;
+        if (auctionIndex > currentAuctionIndex) {
+            revert InvalidAuctionIndexError(auctionIndex);
+        }
+
+        Bid storage bid = bids[tokenContract][tokenId][auctionIndex][msg.sender];
+        if (bid.commitment != bytes20(0)) {
+            revert UnrevealedBidError();
+        }
+
+        if (auctionIndex == currentAuctionIndex) {
+            // If bidder has commited but not revealed their bid, they can withdraw their collateral.
+            if (!bid.revealed) {
+                revert NotRevealedError();    
+            }
+        }
+        // Return collateral
+        uint96 collateral = bid.collateral;
+        bid.collateral = 0;
+        msg.sender.safeTransferETH(collateral);
+        bidCounter -= 1;
     }
 
     /// @notice Gets the parameters and state of an auction in storage.
