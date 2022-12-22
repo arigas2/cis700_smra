@@ -17,4 +17,5 @@ interface SMRAErrors {
     error InvalidStartTimeError(uint32 startTime);
     error InvalidOpeningError(bytes20 bidHash, bytes20 commitment);
     error NotRevealedError();
+    error WithdrawAfterRevealError();
 }

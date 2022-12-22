@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity ^0.8.13;
 
-import "solmate/utils/ReentrancyGuard.sol";
+import "solmate/src/utils/ReentrancyGuard.sol";
+import "solmate/src/utils/SafeTransferLib.sol";
+import "solmate/src/tokens/ERC721.sol";
+import "./SMRAErrors.sol";
 
-contract SimultaneousMultiRoundAuction {
-
+contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
+    using SafeTransferLib for address;
     // needs to account for multiple items and multiple rounds
 
     /// @dev Representation of an auction in storage. Occupies three slots.
@@ -60,31 +63,73 @@ contract SimultaneousMultiRoundAuction {
         bool revealed;
     }
 
+    struct itemSet {
+        uint256[] tokenIds;
+    }
+
+    /// @notice Emitted when an auction is created.
+    /// @param tokenContract The address of the ERC721 contract for the asset
+    ///        being auctioned.
+    /// @param tokenIds The ERC721 token ID of the asset being auctioned.
+    /// @param seller The address selling the auctioned asset.
+    /// @param startTime The unix timestamp at which bidding can start.
+    /// @param bidPeriod The duration of the bidding period, in seconds.
+    /// @param revealPeriod The duration of the commitment reveal period, 
+    ///        in seconds.
+    /// @param reservePrice The minimum price that the asset will be sold for.
+    ///        If no bids exceed this price, the asset is returned to `seller`.
+    event AuctionCreated(
+        address tokenContract,
+        uint256[] tokenIds,
+        address seller,
+        uint32 startTime,
+        uint32 bidPeriod,
+        uint32 revealPeriod,
+        uint96 reservePrice
+    );
+
+    /// @notice Emitted when a bid commitment is opened.
+    /// @param tokenContract The address of the ERC721 contract for the asset
+    ///        being auctioned.
+    /// @param tokenIds The ERC721 token ID of the asset being auctioned.
+    /// @param commitment The commitment that was opened.
+    /// @param bidder The bidder whose bid was revealed.
+    /// @param nonce The random input used to obfuscate the commitment.
+    /// @param bidValue The value of the bid.
+    event BidRevealed(
+        address tokenContract,
+        bytes32 tokenIds,
+        bytes20 commitment,
+        address bidder,
+        bytes32 nonce,
+        uint96 bidValue
+    );
+
 
     // a16z implementation maps from nft contract to token id to auction
     // need to map from nft contract to group of token ids to auction
     // right now user needs to follow ordering of tokenIds from least to greatest
-    mapping(address => mapping(uint256[] => Auction)) public auctions;
-
-    // bool newRound;
-    uint64 bidCounter = 0;
+    mapping(address => mapping(bytes32 => Auction)) public auctions;
 
     /// @notice A mapping storing bid commitments and records of collateral, 
     ///         indexed by: ERC721 contract address, token ID, auction index, 
     ///         and bidder address. If the commitment is `bytes20(0)`, either
     ///         no commitment was made or the commitment was opened.
     mapping(address // ERC721 token contract
-        => mapping(uint256[] // ERC721 token IDs
+        => mapping(bytes32 // ERC721 token IDs
             => mapping(uint64 // Auction index
                 => mapping(uint256 // specific ERC token ID of item
                     => mapping(address // Bidder
                         => Bid))))) public bids;
 
+    // bool newRound;
+    uint64 bidCounter = 0;
+
     /// @notice Creates an auction for the given ERC721 asset with the given
     ///         auction parameters.
     /// @param tokenContract The address of the ERC721 contract for the asset
     ///        being auctioned.
-    /// @param tokenId The ERC721 token ID of the asset being auctioned.
+    /// @param tokenIds The ERC721 token ID of the asset being auctioned.
     /// @param startTime The unix timestamp at which bidding can start.
     /// @param bidPeriod The duration of the bidding period, in seconds.
     /// @param revealPeriod The duration of the commitment reveal period, 
@@ -93,7 +138,7 @@ contract SimultaneousMultiRoundAuction {
     ///        If no bids exceed this price, the asset is returned to `seller`.
     function createAuction(
         address tokenContract,
-        uint256[] tokenIds,
+        uint256[] calldata tokenIds,
         uint32 startTime, 
         uint32 bidPeriod,
         uint32 revealPeriod,
@@ -102,7 +147,8 @@ contract SimultaneousMultiRoundAuction {
         external
         nonReentrant
     {
-        Auction storage auction = auctions[tokenContract][tokenIds];
+        bytes32 itemHash = keccak256(abi.encodePacked(tokenIds));
+        Auction storage auction = auctions[tokenContract][itemHash];
 
         if (startTime == 0) {
             startTime = uint32(block.timestamp);
@@ -130,11 +176,10 @@ contract SimultaneousMultiRoundAuction {
              // pay at least this price.
             auction.highestBids[tokenIds[i]] = reservePrice;
             auction.highestBidders[tokenIds[i]] = address(0);
+            ERC721(tokenContract).transferFrom(msg.sender, address(this), tokenIds[i]);
         }
         // Increment auction index for this item
         auction.index++;
-
-        ERC721(tokenContract).transferFrom(msg.sender, address(this), tokenId);
 
         emit AuctionCreated(
             tokenContract,
@@ -158,7 +203,7 @@ contract SimultaneousMultiRoundAuction {
     ///        `bytes20(keccak256(abi.encode(nonce, bidValue, tokenContract, tokenIds, specifictokenId, auctionIndex)))`.
     function commitBid(
         address tokenContract, 
-        uint256[] tokenIds,
+        bytes32 tokenIds,
         uint256 specificTokenId, 
         bytes20 commitment
     )
@@ -198,7 +243,6 @@ contract SimultaneousMultiRoundAuction {
         // if (!newRound) {
         //     newRound = true;
         // }
-        bidCounter += 1;
     }
 
 
@@ -211,7 +255,7 @@ contract SimultaneousMultiRoundAuction {
     /// @param nonce The random input used to obfuscate the commitment.
     function revealBid(
         address tokenContract,
-        uint256[] tokenIds,
+        bytes32 tokenIds,
         uint256 specificTokenId,
         uint96 bidValue,
         bytes32 nonce
@@ -256,6 +300,7 @@ contract SimultaneousMultiRoundAuction {
             bid.collateral = 0;
             msg.sender.safeTransferETH(collateral);
         } else {
+            bidCounter += 1;
             // Update record of highest bid as necessary
             uint96 currentHighestBid = auction.highestBids[specificTokenId];
             if (bidValue > currentHighestBid) {
@@ -272,7 +317,7 @@ contract SimultaneousMultiRoundAuction {
 
             emit BidRevealed(
                 tokenContract,
-                tokenId,
+                tokenIds,
                 bidHash,
                 msg.sender,
                 nonce,
@@ -297,14 +342,15 @@ contract SimultaneousMultiRoundAuction {
 
     function endRound(
         address tokenContract,
-        uint256[] tokenIds,
+        uint256[] calldata tokenIds,
+        bytes32 hashTokenIds,
         uint32 startTime, 
         uint32 bidPeriod,
         uint32 revealPeriod)
         external
         nonReentrant
     {
-        Auction storage auction = auctions[tokenContract][tokenIds];
+        Auction storage auction = auctions[tokenContract][hashTokenIds];
         if (auction.index == 0) {
             revert InvalidAuctionIndexError(0);
         }
@@ -329,20 +375,20 @@ contract SimultaneousMultiRoundAuction {
                     // No winner, return asset to seller.
                     ERC721(tokenContract).safeTransferFrom(address(this), auction.seller, specificTokenId);
                 } else {
-                    Bid storage bid = bids[tokenContract][tokenIds][auction.index][specificTokenId][itemHighestBidder];
+                    Bid storage bid = bids[tokenContract][hashTokenIds][auction.index][specificTokenId][itemHighestBidder];
                     if (!bid.revealed) {
                         revert NotRevealedError();
                     }
                     // Transfer auctioned asset to highest bidder
                     ERC721(tokenContract).safeTransferFrom(address(this), itemHighestBidder, specificTokenId);
-                    uint96 itemHighestBid = highestBid[specificTokenId];
+                    uint96 itemHighestBid = auction.highestBids[specificTokenId];
                     auction.seller.safeTransferETH(itemHighestBid);
 
                     // Return excess collateral
                     uint96 collateral = bid.collateral;
                     bid.collateral = 0;
                     if (collateral - itemHighestBid != 0) {
-                        highestBidder.safeTransferETH(collateral - itemHighestBid);
+                        itemHighestBidder.safeTransferETH(collateral - itemHighestBid);
                     }
                 }
             }
@@ -378,8 +424,9 @@ contract SimultaneousMultiRoundAuction {
     /// @param auctionIndex The index of the auction that was being bid on.
     function withdrawCollateral(
         address tokenContract,
-        uint256[] tokenIds,
-        uint64 auctionIndex
+        bytes32 tokenIds,
+        uint64 auctionIndex,
+        uint256 specificTokenId
     )
         external
         nonReentrant        
@@ -390,7 +437,7 @@ contract SimultaneousMultiRoundAuction {
             revert InvalidAuctionIndexError(auctionIndex);
         }
 
-        Bid storage bid = bids[tokenContract][tokenId][auctionIndex][msg.sender];
+        Bid storage bid = bids[tokenContract][tokenIds][auctionIndex][specificTokenId][msg.sender];
         if (bid.commitment != bytes20(0)) {
             revert UnrevealedBidError();
         }
@@ -398,7 +445,7 @@ contract SimultaneousMultiRoundAuction {
         if (auctionIndex == currentAuctionIndex) {
             // If bidder has revealed their bid and is not currently in the 
             // running to win the auction, they can withdraw their collateral.
-            if (msg.sender == auction.highestBidder) {
+            if (msg.sender == auction.highestBidders[specificTokenId]) {
                 revert CannotWithdrawError();    
             }
         }
@@ -416,8 +463,9 @@ contract SimultaneousMultiRoundAuction {
     /// @param auctionIndex The index of the auction that was being bid on.
     function withdrawCollateralBeforeReveal(
         address tokenContract,
-        uint256[] tokenIds,
-        uint64 auctionIndex
+        bytes32 tokenIds,
+        uint64 auctionIndex,
+        uint256 specificTokenId
     )
         external
         nonReentrant        
@@ -428,31 +476,30 @@ contract SimultaneousMultiRoundAuction {
             revert InvalidAuctionIndexError(auctionIndex);
         }
 
-        Bid storage bid = bids[tokenContract][tokenId][auctionIndex][msg.sender];
+        Bid storage bid = bids[tokenContract][tokenIds][auctionIndex][specificTokenId][msg.sender];
         if (bid.commitment != bytes20(0)) {
             revert UnrevealedBidError();
         }
 
         if (auctionIndex == currentAuctionIndex) {
             // If bidder has commited but not revealed their bid, they can withdraw their collateral.
-            if (!bid.revealed) {
-                revert NotRevealedError();    
+            if (bid.revealed) {
+                revert WithdrawAfterRevealError();    
             }
         }
         // Return collateral
         uint96 collateral = bid.collateral;
         bid.collateral = 0;
         msg.sender.safeTransferETH(collateral);
-        bidCounter -= 1;
     }
 
     /// @notice Gets the parameters and state of an auction in storage.
     /// @param tokenContract The address of the ERC721 contract for the asset auctioned.
-    /// @param tokenId The ERC721 token ID of the asset auctioned.
-    function getAuction(address tokenContract, uint256[] tokenIds)
-        external
+    /// @param tokenIds The ERC721 token ID of the asset auctioned.
+    function getAuction(address tokenContract, bytes32 tokenIds)
+        internal
         view
-        returns (Auction memory auction)
+        returns (Auction storage auction)
     {
         return auctions[tokenContract][tokenIds];
     }
