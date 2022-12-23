@@ -381,14 +381,17 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
                     if (!bid.revealed) {
                         revert NotRevealedError();
                     }
+
+                    // Return excess collateral
+                    uint96 collateral = bid.collateral;
+                    bid.collateral = 0;
+
                     // Transfer auctioned asset to highest bidder
                     ERC721(tokenContract).safeTransferFrom(address(this), itemHighestBidder, specificTokenId);
                     uint96 itemHighestBid = auction.highestBids[specificTokenId];
                     auction.seller.safeTransferETH(itemHighestBid);
 
                     // Return excess collateral
-                    uint96 collateral = bid.collateral;
-                    bid.collateral = 0;
                     if (collateral - itemHighestBid != 0) {
                         itemHighestBidder.safeTransferETH(collateral - itemHighestBid);
                     }
