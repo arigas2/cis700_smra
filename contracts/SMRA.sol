@@ -72,10 +72,6 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
         bool revealed;
     }
 
-    struct itemSet {
-        uint256[] tokenIds;
-    }
-
     /// @notice Emitted when an auction is created.
     /// @param tokenContract The address of the ERC721 contract for the asset
     ///        being auctioned.
