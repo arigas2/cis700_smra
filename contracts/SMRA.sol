@@ -48,6 +48,8 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
         // =====================
         mapping(uint256 => address) highestBidders;
         uint64 index;
+        uint64 bidCounter;
+
     }
 
     /// @dev Representation of a bid in storage. Occupies one slot.
@@ -129,8 +131,6 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
                     => mapping(address // Bidder
                         => Bid))))) public bids;
 
-    uint64 bidCounter = 0;
-
     /// @notice Creates an auction for the given ERC721 assets with the given
     ///         auction parameters.
     /// @param tokenContract The address of the ERC721 contract for the asset
@@ -174,6 +174,7 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
         auction.endOfRevealPeriod = startTime + bidPeriod + revealPeriod;
         auction.firstBiddingPeriod = bidPeriod;
         auction.firstRevealPeriod = revealPeriod;
+        auction.bidCounter = 0;
 
         for (uint i = 0; i < tokenIds.length; i++) {
             // Resets
@@ -307,7 +308,7 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
             bid.collateral = 0;
             msg.sender.safeTransferETH(collateral);
         } else {
-            bidCounter += 1;
+            auction.bidCounter += 1;
             // Update record of highest bid as necessary
             uint96 currentHighestBid = auction.highestBids[specificTokenId];
             if (bidValue > currentHighestBid) {
@@ -366,7 +367,7 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
         }
 
         // if (!newRound) {
-        if (bidCounter == 0) {
+        if (auction.bidCounter == 0) {
             // no new bids that round so end auction
             for (uint i = 0; i < tokenIds.length; i++) {
                 /// TODO: double check specificTokenId?
@@ -412,7 +413,7 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
             auction.startTime = startTime;
             auction.endOfBiddingPeriod = startTime + bidPeriod;
             auction.endOfRevealPeriod = startTime + bidPeriod + revealPeriod;
-            bidCounter = 0;
+            auction.bidCounter = 0;
         }
     }
 
