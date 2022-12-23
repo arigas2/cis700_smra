@@ -8,7 +8,7 @@ import "./SMRAErrors.sol";
 
 
 /// @title A simulator for trees
-/// @author Ruifan Wang, Leo Zheng, Andrew Rigas
+/// @author Ruifan Wang, Tianze Zheng, Andrew Rigas
 /// @notice draws from https://github.com/a16z/auction-zoo/tree/main/src/sealed-bid/over-collateralized-auction
 
 contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
@@ -366,11 +366,9 @@ contract SimultaneousMultiRoundAuction is SMRAErrors, ReentrancyGuard{
             }
         }
 
-        // if (!newRound) {
         if (auction.bidCounter == 0) {
             // no new bids that round so end auction
             for (uint i = 0; i < tokenIds.length; i++) {
-                /// TODO: double check specificTokenId?
                 uint256 specificTokenId = tokenIds[i];
                 address itemHighestBidder = auction.highestBidders[specificTokenId];
                 if (itemHighestBidder == address(0)) {
